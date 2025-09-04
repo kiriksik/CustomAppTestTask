@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  service:
+    build: .
+    container_name: my_service
+    ports:
+      - "64333:64333"
+    network_mode: "host"
+
+  inspector:
+    build: .
+    container_name: inspector
+    command: ["./inspector_linux_amd64"]
+    network_mode: "host"
+    depends_on:
+      - service

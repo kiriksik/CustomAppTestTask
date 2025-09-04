@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 
 	"go.uber.org/zap"
@@ -16,16 +15,18 @@ type Server struct {
 	maxClientGenerate    float64
 	count                float64
 	sumExpectedGenerated float64
+	alpha                float64
 }
 
 func NewServer(logger *zap.Logger, rtp float64) *Server {
 	return &Server{
 		logger:               logger,
 		rtp:                  rtp,
-		maxGenerate:          500,
+		maxGenerate:          10000,
 		maxClientGenerate:    10000,
 		count:                0,
 		sumExpectedGenerated: 0,
+		alpha:                0.05,
 	}
 }
 
@@ -37,19 +38,22 @@ func (s *Server) RegisterRoutes() *http.ServeMux {
 }
 
 func (s *Server) HandleGet(w http.ResponseWriter, r *http.Request) {
-	// если N запросов для чисел от 0 до 10 000,
-	// то среднее число в каждом запросе 5 000
-	// sum0 = N
-	// sum1 = 5 000 * N
-	// значит, если RTP допустим 0.95, то sum1 должно быть
-	// sum1expected = 0.95 * 5 000 * И = 4 750 * N
-	// т.е. фактически, от генератора приходит 500 * N / 10 000 чисел до 500
-	// т.е. в среднем 250 * N / 10 000 = 125 000 для чисел до 500
-	// значит при ограничении генератора 500,
-	// при увеличении количества запросов точность (приближение RES к RTP) будет расти
-	// значит в среднем 50% чисел до 500 выживут,
-	// их среднее значение 250,
-	// т.е. в среднем sum1 = 62 500
+	/* expectedRES – сглаженное ожидаемое значение метрики RES
+
+	alpha – коэффициент коррекции, который уменьшает expectedRES на каждой итерации,
+	чтобы сократить разрыв между теоретическим и реальным значением.
+
+	алгоритм работает так:
+	рассчитывается мультипликатор (число от 0 до maxGenerate) путём разности между sumExpectedGenerated и суммой, которая должна быть в реальности.
+
+	если expectedRES выше целевого RTP, p_zero = 1 (мультипликатор обнуляется),
+	иначе p_zero = 0 (мультипликатор сохраняется).
+	основное отличие в том что alpha компенсирует накопленное смещение,
+	при большом числе итераций разница между expectedRES и реальным RES
+	постепенно сокращается и алгоритм остаётся стабильным
+	в том числе если все числа в последовательности одинаковые (исключается вероятность, которую даёт случайное генерирование мультипликатора
+	и в первых шагах и в случае необходимости сильного изменения суммы мультипликатор = 10 000, т.е. любое число на стороне клиента в любом случае
+	не будет пропущено */
 
 	var multiplier float64
 	var p_zero float64
@@ -58,16 +62,23 @@ func (s *Server) HandleGet(w http.ResponseWriter, r *http.Request) {
 		expectedRES = 0
 	} else {
 		expectedRES = s.sumExpectedGenerated / s.count
+		expectedRES = (1-s.alpha)*expectedRES + s.alpha
 	}
 	if expectedRES > s.rtp {
 		p_zero = 1
 	} else {
-		meanGenerator := s.maxGenerate / 2
-		p_zero = 1 - (((s.count+1)*s.rtp - s.sumExpectedGenerated) / meanGenerator)
+		p_zero = 0
+		// meanGenerator := s.maxGenerate / 2
+		// p_zero = 1 - (((s.count+1)*s.rtp - s.sumExpectedGenerated) / meanGenerator)
 	}
 
-	multiplier = rand.Float64() * (s.maxGenerate)
-	if rand.Float64() < p_zero {
+	multiplier = (s.count+1)*s.rtp - s.sumExpectedGenerated
+	if multiplier < 0 {
+		multiplier = 0
+	} else if multiplier > s.maxGenerate {
+		multiplier = s.maxGenerate
+	}
+	if p_zero == 1 {
 		multiplier = 0
 	}
 	s.count++
